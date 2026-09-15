@@ -1,0 +1,61 @@
+# Leitstand client configuration. One file, one source of truth; no configuration comes from the shell.
+#
+# A robot driven by a standard Nav2 stack fills in everything above `nav2:` and leaves that block out.
+
+# Lowercase letters, digits, _ and -; must start with a letter or digit. The backend rejects
+# anything else before it reads a byte of payload.
+id: test_robot_1
+
+leitstand:
+  endpoint: tcp/192.168.126.10:7447
+  zenoh_mode: client                  # client dials the router; peer also dials endpoint, without a router in between
+
+ros:
+  domain: 0
+  node_name: leitstand_client
+  use_sim_time: false                 # true only under a simulation clock
+  cyclonedds_uri: ""                  # overrides CYCLONEDDS_URI from the environment when set; empty inherits it
+
+# Omit the whole block to publish no pose.
+telemetry:
+  pose:
+    msg_type: gps_msgs/msg/GPSFix     # or sensor_msgs/msg/NavSatFix
+    topic: /gpsfix
+    heading_from_dip: false           # true only for a Septentrio receiver, which puts the heading in GPSFix.dip
+
+# Required to receive missions: a robot without a factsheet is online and never dispatched to.
+factsheet:
+  navigation:
+    supported_waypoint_kinds: [wgs84]
+  # Declare coverage only if the robot follows a swath as a line rather than visiting its ends.
+  coverage:
+    supported_waypoint_kinds: [wgs84]
+  physical_parameters:
+    track_width_m: 0.416503           # wheel centre to wheel centre
+    min_turning_radius_m: 0.0         # zero for a machine that turns on the spot
+
+navigation: nav2                      # nav2; fake drives nothing and still talks to the Leitstand; any other name is your own Navigation
+fake:
+  speed_mps: 1.0
+
+# Every value below is the default. Omit the block if your Nav2 bringup is standard.
+nav2:
+  actions:
+    navigate_through_poses: navigate_through_poses
+    navigate_to_pose: navigate_to_pose
+    follow_path: follow_path
+  frames:
+    map: map
+    base: base_footprint
+  controller_id: FollowPath           # the controller_server plugin name in your nav2 params
+  projection_service: /fromLL         # robot_localization's WGS84-to-map service
+  projection_timeout_s: 2.0
+  send_goal_timeout_s: 5.0
+  follow_path_attempts: 3             # a coverage stage fails after this many aborted attempts
+  follow_path_retry_s: 5.0
+  resume_behind_m: 3.0                # after an abort, resume this far behind the machine so the controller has path to lock onto
+  approach_tolerance_m: 2.0           # farther than this from the path, drive to it first
+  max_pose_spacing_m: 2.0             # straights are filled to this spacing; keep it inside the controller's lookahead
+  progress_tick_s: 0.5
+  commanded_path_topic: /leitstand/coverage_path   # the path sent to FollowPath, published here so RViz can show it
+  stop_topic: ""                      # a twist_mux input with top priority; empty means an immediate cancel equals a graceful one

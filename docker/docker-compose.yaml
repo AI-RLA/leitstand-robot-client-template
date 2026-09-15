@@ -1,0 +1,34 @@
+# One robot's client as a long-running service. From a workspace src/ directory that holds this
+# repo and leitstand-robot-contract side by side:
+#   docker compose -f leitstand-robot-client-template/docker/docker-compose.yaml up -d --build
+# Values in a .env file next to this compose file override the defaults below.
+services:
+  client:
+    build:
+      # The parent of both checkouts, because the Dockerfile copies the contract from there.
+      context: ../..
+      dockerfile: leitstand-robot-client-template/docker/Dockerfile
+      args:
+        ROS_DISTRO: ${ROS_DISTRO:-humble}
+    image: leitstand-client:${ROS_DISTRO:-humble}
+    # DDS discovery and shared-memory transport both need the host's network and IPC namespaces.
+    network_mode: host
+    ipc: host
+    restart: unless-stopped
+    environment:
+      RMW_IMPLEMENTATION: ${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}
+      # Read by Cyclone only when RMW_IMPLEMENTATION selects it; the file is mounted below.
+      CYCLONEDDS_URI: file:///config/cyclone.xml
+      LEITSTAND_LOG_LEVEL: ${LEITSTAND_LOG_LEVEL:-INFO}
+    volumes:
+      # Long form so a wrong path fails the start; the short form would mount an empty directory.
+      - type: bind
+        source: ${ROBOT_CONFIG:?set ROBOT_CONFIG in docker/.env to the robot.yaml to run}
+        target: /config/robot.yaml
+        read_only: true
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${CYCLONEDDS_CONFIG:-./cyclone.xml}
+        target: /config/cyclone.xml
+        read_only: true
+        bind: { create_host_path: false }

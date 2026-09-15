@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!-- Cyclone's defaults; mounted when no robot-specific config is given, so the URI is always valid. -->
+<CycloneDDS>
+  <Domain id="any"/>
+</CycloneDDS>

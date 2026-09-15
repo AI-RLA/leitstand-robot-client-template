@@ -1,0 +1,5 @@
+eclipse-zenoh>=1.0.0
+pyyaml>=6.0
+pydantic>=2.6,<3.0
+protobuf>=7.35.1
+protovalidate>=1.2

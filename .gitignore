@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+build/
+install/
+log/
+.pytest_cache/
+.ruff_cache/
+.vscode/
+docker/.env

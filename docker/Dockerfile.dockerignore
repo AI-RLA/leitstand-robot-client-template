@@ -1,0 +1,15 @@
+# The build context is the parent of both checkouts; only the two of them go to the daemon,
+# and none of their caches or environments.
+*
+!leitstand-robot-contract/**
+!leitstand-robot-client-template/**
+**/.git
+**/.omc
+**/.vscode
+**/.venv
+**/__pycache__
+**/*.egg-info
+**/build
+**/install
+**/log
+**/node_modules

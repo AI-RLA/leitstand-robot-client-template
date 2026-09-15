@@ -1,0 +1,43 @@
+# A profile for a Gazebo + Nav2 simulation: simulation clock, NavSatFix pose, standard Nav2 actions.
+
+id: scout_2_sim
+
+leitstand:
+  endpoint: tcp/localhost:7447
+
+ros:
+  domain: 0
+  use_sim_time: true
+
+telemetry:
+  pose:
+    msg_type: sensor_msgs/msg/NavSatFix
+    topic: /navsatfix
+
+factsheet:
+  navigation:
+    supported_waypoint_kinds: [wgs84]
+  # Declared because a coverage stage is driven as one FollowPath goal over the planned line,
+  # which needs follow_path with a "FollowPath" controller and the /fromLL service.
+  coverage:
+    supported_waypoint_kinds: [wgs84]
+  physical_parameters:
+    # The URDF's own `track`, wheel centre to centre. Not base_y_size, which is the body.
+    track_width_m: 0.416503
+    min_turning_radius_m: 0.0
+  sites: []
+
+# Switch to fake to prove the Leitstand link before Nav2 is up.
+navigation: nav2
+
+# All defaults, spelled out so the demo shows the shape a partner edits.
+nav2:
+  actions:
+    navigate_through_poses: navigate_through_poses
+    navigate_to_pose: navigate_to_pose
+    follow_path: follow_path
+  frames:
+    map: map
+    base: base_footprint
+  controller_id: FollowPath
+  projection_service: /fromLL

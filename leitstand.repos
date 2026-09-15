@@ -1,0 +1,5 @@
+repositories:
+  leitstand-robot-contract:
+    type: git
+    url: https://github.com/AI-RLA/leitstand-robot-contract.git
+    version: v0.4.0

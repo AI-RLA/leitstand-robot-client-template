@@ -1,0 +1,24 @@
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+docstring-code-format = true
+
+[tool.pytest.ini_options]
+# Each ament package root shares its name with the Python package inside it; put the roots on the
+# path so the inner packages win over the bare directories.
+pythonpath = ["leitstand_client", "leitstand_client_ros2"]
+testpaths = ["leitstand_client/tests", "leitstand_client_ros2/tests"]
+python_files = "test_*.py"
+addopts = "-q --tb=short"
+
+[tool.ruff.lint.isort]
+known-first-party = ["leitstand_client", "leitstand_client_ros2"]

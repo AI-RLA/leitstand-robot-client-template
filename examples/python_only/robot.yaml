@@ -1,0 +1,7 @@
+# The smallest config that gets a robot onto the Leitstand and able to receive missions.
+id: python_example
+leitstand:
+  endpoint: tcp/localhost:7447
+factsheet:
+  navigation:
+    supported_waypoint_kinds: [wgs84]
