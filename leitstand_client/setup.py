@@ -4,7 +4,7 @@ package_name = "leitstand_client"
 
 setup(
     name=package_name,
-    version="0.1.0",
+    version="0.1.1",
     description="Robot-side client for the Leitstand: registration, factsheet, missions, state, pose.",
     maintainer="Jannik Jose",
     maintainer_email="jannik.jose@hs-osnabrueck.de",
@@ -15,11 +15,11 @@ setup(
         ("share/" + package_name, ["package.xml"]),
     ],
     install_requires=[
-        "eclipse-zenoh>=1.0.0",
+        "eclipse-zenoh>=1.0,<2",
         "pyyaml>=6.0",
         "pydantic>=2.6,<3.0",
-        "protobuf>=7.35.1",
-        "protovalidate>=1.2",
+        "protobuf>=7.35.1,<8",
+        "protovalidate>=1.2,<2",
         "leitstand-robot-contract==0.4.0",
     ],
     python_requires=">=3.10",
