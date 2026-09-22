@@ -1,6 +1,8 @@
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+# ruff formats Python blocks in Markdown, and the docs' snippets are excerpts.
+extend-exclude = ["*.md"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]
@@ -18,7 +20,9 @@ docstring-code-format = true
 pythonpath = ["leitstand_client", "leitstand_client_ros2"]
 testpaths = ["leitstand_client/tests", "leitstand_client_ros2/tests"]
 python_files = "test_*.py"
-addopts = "-q --tb=short"
+# These tests need no third-party plugin, and a sourced ROS otherwise loads launch_testing, whose
+# hook signature predates pytest 9.1.
+addopts = "-q --tb=short --disable-plugin-autoload"
 
 [tool.ruff.lint.isort]
 known-first-party = ["leitstand_client", "leitstand_client_ros2"]
