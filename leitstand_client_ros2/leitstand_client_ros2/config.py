@@ -39,7 +39,7 @@ class Nav2Config(BaseModel):
     # Farther than this from the path, drive to it first: the controller only follows a path
     # where it crosses the local costmap.
     approach_tolerance_m: float = Field(default=2.0, gt=0)
-    max_pose_spacing_m: float = Field(default=2.0, gt=0)
+    max_pose_spacing_m: float = Field(default=0.5, gt=0)
     progress_tick_s: float = Field(default=0.5, gt=0)
     # The path handed to FollowPath, published here so RViz can show it (Nav2 does not).
     commanded_path_topic: str = "/leitstand/coverage_path"

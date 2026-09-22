@@ -47,65 +47,89 @@ Nav2 actions and a GNSS topic. The language of everything around it does not mat
 
 ## Prerequisites
 
-- ROS 2 (humble, iron or jazzy) with Nav2 for the ROS package; the library requires no ROS.
-  Target whichever your robot already runs.
+- ROS 2 with Nav2 for the ROS package (the library requires no ROS). Target whichever your robot
+  already runs.
 - A Nav2 stack exposing the standard actions, for the Nav2 path.
 - Git access to `leitstand-robot-contract`. The client speaks contract version **0.4.0**, which
   Leitstand backend 0.6.0 and later serve.
-- A reachable Leitstand Zenoh router. The link carries no authentication: anyone who can
-  reach the router can act as a robot. Operate it only on a trusted network.
+- A reachable Leitstand Zenoh router.
+
+The Leitstand is a research prototype. The connection between the backend and the robots is
+neither authenticated nor encrypted, and the operator interface has no user accounts. Run all
+components on a private network or behind a VPN.
 
 ## Installation on the host
 
-Both this repo and the contract go into a colcon workspace, side by side:
+Both this repo and the contract go into a colcon workspace, side by side. With the robot's ROS
+sourced and `python3-venv` installed (apt):
 
 ```
 mkdir -p ws/src && cd ws
 git clone <this repo> src/leitstand-robot-client-template
 vcs import src < src/leitstand-robot-client-template/leitstand.repos   # fetches the contract at its tag
-pip install --user ./src/leitstand-robot-contract
-pip install --user -r src/leitstand-robot-client-template/leitstand_client/requirements.txt
 rosdep install --from-paths src --ignore-src -y
-colcon build --symlink-install
+python3 -m venv --system-site-packages venv && touch venv/COLCON_IGNORE
+venv/bin/pip install --upgrade pip   # 22.04's pip cannot build the contract's package metadata
+venv/bin/pip install ./src/leitstand-robot-contract -r src/leitstand-robot-client-template/leitstand_client/requirements.txt
+venv/bin/python -m colcon build --symlink-install
 source install/setup.bash
 ```
 
-`vcs` is provided by `python3-vcstool`. Use `--user` rather than a virtualenv: `rclpy` is
-installed only with ROS, and a virtualenv cannot see it unless ROS is sourced first. Without
-`vcs`, `pip install "git+https://github.com/AI-RLA/leitstand-robot-contract.git@v0.4.0"` installs the
+The same block works on Ubuntu 22.04, 24.04 and 26.04. The virtual environment exists because pip
+may not replace the Python packages Ubuntu installed (24.04 refuses outright, and one of ours needs
+a newer PyYAML than 24.04 ships), and `--system-site-packages` keeps the ROS packages visible.
+`python -m colcon build` runs colcon under the environment's interpreter so the installed `client`
+entry point uses it. A plain `colcon build` binds it to `/usr/bin/python3`, which cannot import the
+packages above (`ModuleNotFoundError: zenoh` at start). `vcs` comes with `python3-vcstool`. Without
+it, `pip install "git+https://github.com/AI-RLA/leitstand-robot-contract.git@v0.4.0"` installs the
 contract directly.
+
+Upgrading from v0.1.0, which installed with `pip install --user`: remove those packages first
+(`python3 -m pip uninstall leitstand-robot-contract eclipse-zenoh protobuf protovalidate pydantic`).
+The environment would otherwise use the copies in `~/.local` and break when they are removed.
 
 ## Installation with Docker
 
-From the workspace `src/` directory that holds both checkouts:
+Put your `robot.yaml` in a directory of its own, for example `/etc/leitstand`, and mount that
+directory at `/config`. From the workspace `src/` directory that holds both checkouts:
 
 ```
-docker build -f leitstand-robot-client-template/docker/Dockerfile -t leitstand-client .
-docker run --rm --network host -v $PWD/robot.yaml:/config/robot.yaml leitstand-client
+docker build --build-arg ROS_DISTRO=jazzy -f leitstand-robot-client-template/docker/Dockerfile -t leitstand-client:jazzy .
+docker run --rm --network host -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp -v /etc/leitstand:/config leitstand-client:jazzy
 ```
+
+The image runs `/config/robot.yaml`. For another file name, append the launch command with your
+own, as the compose file does:
+`ros2 launch leitstand_client_ros2 client.launch.py config:=/config/<file>`.
 
 As a service that survives reboots, the same in one file: copy `docker/.env.example` to
-`docker/.env`, set the ROS distribution, the DDS vendor and the path to your `robot.yaml`, then
+`docker/.env`, set the ROS distribution, the DDS vendor, the directory that holds your
+configuration and the file in it to load, then
 
 ```
 docker compose -f leitstand-robot-client-template/docker/docker-compose.yaml up -d --build
 ```
 
 The compose file carries the flags below (`network_mode: host`, `ipc: host`, the RMW choice,
-the config mounts) and `restart: unless-stopped`. `ROS_DISTRO` left unset takes the sourced
-shell's distribution, else humble. The build context is the parent of the two checkouts;
-`docker/Dockerfile.dockerignore` limits what is sent to the two of them.
+the config mount) and `restart: unless-stopped`. `docker/.env` names the robot's ROS distribution
+(`ROBOT_ROS_DISTRO`, a name of its own so a ROS sourced in the shell cannot override it), its DDS
+vendor (`RMW_IMPLEMENTATION`, taken from the shell when the robot exports it) and the configuration
+directory with the file in it to run. It names only what has to be known before that file can be
+read, so everything else, a Cyclone config included, is set inside the file. The build context
+is the parent of the two checkouts, and `docker/Dockerfile.dockerignore` limits what is sent to the
+two of them.
 
 `--network host` is required so DDS inside the container discovers your Nav2, and the container
 must use the robot's DDS vendor: the image holds Fast DDS and Cyclone, so pass
-`-e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp` (with `-e CYCLONEDDS_URI=file:///config/cyclone.xml`
-and the config mounted there) when the robot runs Cyclone. With Fast DDS, the image default, add
-`--ipc host` as well: on one host Fast DDS moves data over shared memory, and without the host's
-`/dev/shm` discovery succeeds while no message ever arrives. The image's
-ROS distribution is a build argument (`--build-arg ROS_DISTRO=iron`) and must match the
-robot's; humble, iron and jazzy are built and checked from it. Python dependencies go into
-a virtual environment inside the image (`/opt/venv`, sharing the ROS packages), so the base
-image's own Python is not touched.
+`-e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp` when the robot runs Cyclone. A robot that needs its own
+Cyclone config puts it beside `robot.yaml` as `cyclone.xml` and names it there
+(`ros.cyclonedds_uri: file:///config/cyclone.xml`). Without one, Cyclone runs on its defaults.
+With Fast DDS, the image default, add `--ipc host` as well: on one host Fast DDS moves data over
+shared memory, and without the host's `/dev/shm` discovery succeeds while no message ever
+arrives. The image's ROS distribution is a build argument (`--build-arg ROS_DISTRO=jazzy`) and
+must match the robot's. Any distribution with a `ros:<distro>` image and Python 3.10 or newer
+builds the same way. Inside it the Python dependencies live in a virtual environment as well
+(`/opt/venv`), for the reason given above.
 
 ## Configuration
 
@@ -122,7 +146,7 @@ Copy `leitstand_client_ros2/config/robot.yaml` and edit it. The file is annotate
 | `nav2` | action names, frames, controller id, tuning. **Omit if your Nav2 is standard.** |
 
 Configuration is not read from the environment, apart from `LEITSTAND_LOG_LEVEL` and what ROS
-itself reads (`RMW_IMPLEMENTATION`, and `CYCLONEDDS_URI` unless `ros.cyclonedds_uri` is set).
+itself reads (`RMW_IMPLEMENTATION`, and `CYCLONEDDS_URI` unless `ros.cyclonedds_uri` names one).
 A misspelled key fails at startup and is named in the error.
 
 ## Running the client
@@ -187,7 +211,13 @@ After either, the stage's `on_cancel` cleanup runs and the run reports CANCELLED
 | Timestamps in 1970 | the robot's clock is not set. The backend trusts robot clocks. |
 | `failed to establish Zenoh connection after retries` | the router at `leitstand.endpoint` is unreachable. The client tries five times over about fifteen seconds, then exits 1. |
 | Start fails naming a key | a misspelled key in `robot.yaml`. Fix the spelling; nothing is ignored silently. |
-| `ModuleNotFoundError: rclpy` in a virtualenv | source ROS before Python, or install with `--user` instead of a virtualenv. |
+| A Cyclone setting has no effect and nothing is logged | `ros.cyclonedds_uri` points at a file the client cannot read. Cyclone ignores a missing or unreadable config without a word. In Docker the path is the container's: `file:///config/cyclone.xml` for a `cyclone.xml` beside your `robot.yaml`. |
+| `ModuleNotFoundError: rclpy` when the node starts | ROS was not sourced before `ros2 launch`. |
+| `ModuleNotFoundError: numpy` on the first message import | the virtual environment was created without `--system-site-packages`. |
+| `ModuleNotFoundError: zenoh` when the node starts | the workspace was built with a plain `colcon build` instead of `venv/bin/python -m colcon build`. |
+| A run fails a second or two after the robot starts driving, and the robot drives on | Nav2's behavior tree gave up waiting for the controller to acknowledge its `follow_path` goal (`bt_navigator` logs "Timed out while waiting for action server to acknowledge goal request") and aborted our goal, while the controller kept the goal it had accepted. Raise `bt_navigator: default_server_timeout` (milliseconds) well above the acknowledgement latency on that machine. |
+| A coverage stage never moves: `controller_server` logs "Failed to make progress" every 10 s | the controller sees too little path: `nav2.max_pose_spacing_m` must stay well inside the local costmap's half-size (Nav2 prunes the path beyond it) and inside the controller's lookahead. Enlarge the local costmap or lower the spacing. |
+| The robot spins and backs up right after a dispatch, then the stage fails | Nav2 could not plan and ran its recoveries, and `planner_server` says why. Most often "Global costmap is not current": a static layer without a map server, or an observation source that publishes nothing. A goal from RViz fails the same way. |
 
 ## Known limitations
 
@@ -199,8 +229,11 @@ After either, the stage's `on_cancel` cleanup runs and the run reports CANCELLED
 
 ## Development
 
+In the workspace's virtual environment (`source venv/bin/activate` in `ws/`):
+
 ```
-make contract-check   # the installed contract is the version this client speaks
+pip install -r requirements-dev.txt   # ruff and pytest, the versions CI runs
+make contract-check   # leitstand.repos, setup.py and the installed contract agree on the version
 make test             # both packages; needs no ROS on the path
 make lint
 ```

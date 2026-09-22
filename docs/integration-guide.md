@@ -21,18 +21,22 @@ lifecycle. Everything the robot must say and answer is in `docs/contract.md`.
 
 This proves the network, the router and the registration before Nav2 or an SDK is involved.
 `FakeNavigation` walks a stage's waypoints in simulated time (default 1 m/s), reports progress,
-pauses and cancels like a real machine, and moves nothing.
+pauses and cancels like a real machine, and moves nothing. With the robot's ROS sourced and
+`python3-venv` installed (apt):
 
 ```
 mkdir -p ws/src && cd ws
 git clone <this repo> src/leitstand-robot-client-template
 vcs import src < src/leitstand-robot-client-template/leitstand.repos
-pip install --user ./src/leitstand-robot-contract
-pip install --user -r src/leitstand-robot-client-template/leitstand_client/requirements.txt
 rosdep install --from-paths src --ignore-src -y
-colcon build --symlink-install
+python3 -m venv --system-site-packages venv && touch venv/COLCON_IGNORE
+venv/bin/pip install --upgrade pip   # 22.04's pip cannot build the contract's package metadata
+venv/bin/pip install ./src/leitstand-robot-contract -r src/leitstand-robot-client-template/leitstand_client/requirements.txt
+venv/bin/python -m colcon build --symlink-install
 source install/setup.bash
 ```
+
+(The README's installation section explains the virtual environment and `python -m colcon`.)
 
 Copy `leitstand_client_ros2/config/robot.yaml`, set `id`, `leitstand.endpoint` (the router on
 the Leitstand box, port 7447) and `navigation: fake`, then:
@@ -72,8 +76,8 @@ modes and the reconnect reconciliation are verified on this path against backend
 The same client runs in Docker (`README.md`, "Installation with Docker"): as a service,
 `docker compose -f leitstand-robot-client-template/docker/docker-compose.yaml up -d --build`
 from the workspace's `src/` with a `docker/.env` naming the ROS distribution, the DDS vendor
-and the `robot.yaml`. Registration, dispatch and the receipts through the container are
-verified; driving Nav2 from the container is not yet.
+and the directory holding `robot.yaml`. Registration, dispatch and the receipts through the
+container are verified. Driving Nav2 from the container is not yet.
 
 ## Step 3: your robot
 

@@ -14,7 +14,7 @@ ros:
   domain: 0
   node_name: leitstand_client
   use_sim_time: false                 # true only under a simulation clock
-  cyclonedds_uri: ""                  # overrides CYCLONEDDS_URI from the environment when set; empty inherits it
+  cyclonedds_uri: ""                  # Cyclone config URI, empty inherits CYCLONEDDS_URI (in Docker: file:///config/cyclone.xml beside this file)
 
 # Omit the whole block to publish no pose.
 telemetry:
@@ -55,7 +55,7 @@ nav2:
   follow_path_retry_s: 5.0
   resume_behind_m: 3.0                # after an abort, resume this far behind the machine so the controller has path to lock onto
   approach_tolerance_m: 2.0           # farther than this from the path, drive to it first
-  max_pose_spacing_m: 2.0             # straights are filled to this spacing; keep it inside the controller's lookahead
+  max_pose_spacing_m: 0.5             # straights are filled to this spacing, which must stay inside the controller's lookahead and the local costmap's half-size
   progress_tick_s: 0.5
   commanded_path_topic: /leitstand/coverage_path   # the path sent to FollowPath, published here so RViz can show it
   stop_topic: ""                      # a twist_mux input with top priority; empty means an immediate cancel equals a graceful one
