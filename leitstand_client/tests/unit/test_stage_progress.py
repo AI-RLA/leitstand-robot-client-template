@@ -193,6 +193,4 @@ def test_stage_failure_attaches_stage_id_reference() -> None:
     assert stage_id_refs, "Expected stage_id ErrorReference; references found: " + str(
         [(r.key, r.value) for e in terminal.errors for r in e.references]
     )
-    assert (
-        stage_id_refs[0].value == "stage-abc"
-    ), f"Expected stage_id='stage-abc', got '{stage_id_refs[0].value}'"
+    assert stage_id_refs[0].value == "stage-abc"
