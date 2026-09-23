@@ -55,8 +55,9 @@ class Navigation(Protocol):
         ``STAGE_STATUS_PAUSED`` and the fraction of the stage done (0 to 1); each call becomes
         a state frame the operator sees. Return ``StageResult(STAGE_STATUS_FINISHED)`` or
         ``StageResult(STAGE_STATUS_FAILED, error=Error(type=..., description=..., severity=...))``
-        with a stable ``type`` code and a description for the operator. An exception raised
-        here ends the whole run as FAILED with the traceback as the description.
+        with a stable ``type`` code and a description for the operator. Without a cancel, any other
+        status ends the run as FAILED. An exception raised here ends the whole run as FAILED with
+        the traceback as the description.
         """
 
     def check_ready(self, mission: mission_pb2.Mission, timeout_s: float) -> str | None:

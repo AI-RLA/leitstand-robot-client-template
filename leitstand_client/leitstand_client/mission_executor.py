@@ -480,29 +480,25 @@ class MissionExecutor:
                         ss.ended_at.FromDatetime(_now())
                         ss.progress = 1.0
                         await self._publish_state(ctx)
-                    elif result.status == mission_state_pb2.STAGE_STATUS_FAILED and (
-                        ctx.cancel_mode is None
-                    ):
-                        ss.status = mission_state_pb2.STAGE_STATUS_FAILED
-                        ss.ended_at.FromDatetime(_now())
-                        ctx.terminal_status = mission_state_pb2.MISSION_EXEC_STATUS_FAILED
-                        if result.error is not None:
-                            # Attach the stage_id so consumers can attribute the error
-                            # to the exact stage without relying on current_stage_index.
-                            result.error.references.append(
-                                mission_state_pb2.ErrorReference(
-                                    key="stage_id", value=stage.stage_id
-                                )
-                            )
-                        errors = [result.error] if result.error else []
-                        await self._publish_state(ctx, errors=errors)
-                        return
-                    else:
+                    elif ctx.cancel_mode is not None:
                         # Stage stopped for a cancel.
                         ss.status = mission_state_pb2.STAGE_STATUS_CANCELLED
                         ss.ended_at.FromDatetime(_now())
                         cancelled_at = i
                         break
+                    else:
+                        # Stage ended without finishing and without a cancel: report the error and stop the run.
+                        ss.status = mission_state_pb2.STAGE_STATUS_FAILED
+                        ss.ended_at.FromDatetime(_now())
+                        ctx.terminal_status = mission_state_pb2.MISSION_EXEC_STATUS_FAILED
+                        error = _stage_error(result)
+                        # Attach the stage_id so consumers can attribute the error
+                        # to the exact stage without relying on current_stage_index.
+                        error.references.append(
+                            mission_state_pb2.ErrorReference(key="stage_id", value=stage.stage_id)
+                        )
+                        await self._publish_state(ctx, errors=[error])
+                        return
 
                 if ctx.shutting_down:
                     ctx.terminal_status = mission_state_pb2.MISSION_EXEC_STATUS_FAILED
@@ -676,6 +672,37 @@ def _reply_control(
         query.reply(key, proto_json.to_json(response))
     except Exception as exc:  # noqa: BLE001
         logger.warning("[executor] control reply failed: %s", exc)
+
+
+def _stage_error(result: StageResult) -> mission_state_pb2.Error:
+    """Return the error for a stage that ended without finishing and without a cancel.
+
+    The navigation's own error wins. Without one, the error names what came back, so a failed
+    run never reaches the operator without a reason.
+    """
+    if result.error is not None:
+        return result.error
+    if result.status == mission_state_pb2.STAGE_STATUS_FAILED:
+        return mission_state_pb2.Error(
+            severity=mission_state_pb2.ERROR_SEVERITY_FATAL,
+            type="navigation_failed",
+            description="navigation reported the stage as failed without a reason",
+        )
+    if result.status == mission_state_pb2.STAGE_STATUS_CANCELLED:
+        return mission_state_pb2.Error(
+            severity=mission_state_pb2.ERROR_SEVERITY_FATAL,
+            type="navigation_cancelled",
+            description="navigation stopped the stage although no cancel was requested",
+        )
+    statuses = mission_state_pb2.StageStatus
+    name = (
+        statuses.Name(result.status) if result.status in statuses.values() else str(result.status)
+    )
+    return mission_state_pb2.Error(
+        severity=mission_state_pb2.ERROR_SEVERITY_FATAL,
+        type="unexpected_stage_result",
+        description=f"navigation returned {name}, expected FINISHED or FAILED",
+    )
 
 
 def _shutdown_error() -> mission_state_pb2.Error:

@@ -187,9 +187,10 @@ metres behind the machine; a navigation stage re-issues its original waypoint li
 structured error reporting.
 
 `cancel_requested()` returns `None` while the run continues, otherwise the cancel mode. Return
-`StageResult(FAILED)` once the machine has stopped. `is_paused()` must be true only while the
-machine stands still; the change is reported through `on_progress` (`PAUSED`, then `RUNNING`),
-which is what the Leitstand shows the operator.
+`StageResult(FAILED)` once the machine has stopped. Without a cancel, any status other than
+FINISHED or FAILED ends the run as FAILED.
+`is_paused()` must be true only while the machine stands still. The change is reported through
+`on_progress` (`PAUSED`, then `RUNNING`), which is what the Leitstand shows the operator.
 
 ## Cancellation
 
