@@ -4,17 +4,20 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
 from google.protobuf import json_format
 from leitstand.robot.v1 import mission_pb2, mission_state_pb2
 
 from leitstand_client.mission_executor import MissionExecutor, _ActiveContext
-from leitstand_client.navigation import FakeNavigation
+from leitstand_client.navigation import FakeNavigation, StageResult
 
 RUN = "11111111-1111-4111-8111-111111111111"
 CANCELLED = mission_state_pb2.STAGE_STATUS_CANCELLED
 SKIPPED = mission_state_pb2.STAGE_STATUS_SKIPPED
 FINISHED = mission_state_pb2.STAGE_STATUS_FINISHED
 RUNNING = mission_state_pb2.STAGE_STATUS_RUNNING
+FAILED = mission_state_pb2.STAGE_STATUS_FAILED
+UNSPECIFIED = mission_state_pb2.STAGE_STATUS_UNSPECIFIED
 
 
 class _Publisher:
@@ -266,3 +269,45 @@ def test_a_cancel_between_stages_runs_the_finished_stages_cleanup() -> None:
     statuses = _statuses(last)
     assert statuses["a-cleanup"] == FINISHED
     assert "b-cleanup" not in statuses
+
+
+class _FixedResultNavigation(FakeNavigation):
+    """Answers every stage with one fixed result."""
+
+    def __init__(self, status: int, error: mission_state_pb2.Error | None = None) -> None:
+        super().__init__()
+        self._result = StageResult(status=status, error=error)
+
+    async def execute_stage(self, stage, robot_id, cancel_requested, on_progress=None):
+        return self._result
+
+
+@pytest.mark.parametrize(
+    ("status", "given", "error_type", "text"),
+    [
+        (CANCELLED, None, "navigation_cancelled", "no cancel was requested"),
+        (UNSPECIFIED, None, "unexpected_stage_result", "STAGE_STATUS_UNSPECIFIED"),
+        (99, None, "unexpected_stage_result", "navigation returned 99"),
+        (FAILED, None, "navigation_failed", "without a reason"),
+        (CANCELLED, mission_state_pb2.Error(type="estop", description="e-stop"), "estop", "e-stop"),
+    ],
+)
+def test_a_stage_that_stops_on_its_own_fails_the_run(
+    status: int, given: mission_state_pb2.Error | None, error_type: str, text: str
+) -> None:
+    async def run() -> mission_state_pb2.MissionState:
+        publisher = _Publisher()
+        mission = mission_pb2.Mission(run_id=RUN, stages=[_stage("a", cleanup=True)])
+        await _executor(_FixedResultNavigation(status, given), publisher)._execute_mission(
+            _ActiveContext(mission=mission)
+        )
+        return publisher.frames[-1]
+
+    last = asyncio.run(run())
+    assert last.exec_status == mission_state_pb2.MISSION_EXEC_STATUS_FAILED
+    # FAILED, and no cleanup: that belongs to an operator's cancel.
+    assert _statuses(last) == {"a": FAILED}
+    (error,) = last.errors
+    assert error.type == error_type
+    assert text in error.description
+    assert ("stage_id", "a") in [(r.key, r.value) for r in error.references]
