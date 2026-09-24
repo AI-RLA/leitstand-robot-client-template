@@ -6,7 +6,7 @@ package_name = "leitstand_client_ros2"
 
 setup(
     name=package_name,
-    version="0.1.1",
+    version="0.1.2",
     description="ROS 2 node for the Leitstand client: Nav2 navigation and GNSS pose relay.",
     maintainer="Jannik Jose",
     maintainer_email="jannik.jose@hs-osnabrueck.de",

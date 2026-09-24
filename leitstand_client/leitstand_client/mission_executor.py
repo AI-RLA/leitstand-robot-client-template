@@ -451,6 +451,7 @@ class MissionExecutor:
 
             heartbeat = asyncio.create_task(self._heartbeat(ctx))
             cancelled_at: int | None = None
+            paused_when_cancelled = False
 
             try:
                 for i, stage in enumerate(ctx.mission.stages):
@@ -480,14 +481,15 @@ class MissionExecutor:
                         ss.ended_at.FromDatetime(_now())
                         ss.progress = 1.0
                         await self._publish_state(ctx)
-                    elif ctx.cancel_mode is not None:
+                    elif ctx.cancel_mode is not None and result.error is None:
                         # Stage stopped for a cancel.
+                        paused_when_cancelled = ss.status == mission_state_pb2.STAGE_STATUS_PAUSED
                         ss.status = mission_state_pb2.STAGE_STATUS_CANCELLED
                         ss.ended_at.FromDatetime(_now())
                         cancelled_at = i
                         break
                     else:
-                        # Stage ended without finishing and without a cancel: report the error and stop the run.
+                        # A failure, also one during a cancel, ends the run with its error and no cleanup.
                         ss.status = mission_state_pb2.STAGE_STATUS_FAILED
                         ss.ended_at.FromDatetime(_now())
                         ctx.terminal_status = mission_state_pb2.MISSION_EXEC_STATUS_FAILED
@@ -513,8 +515,11 @@ class MissionExecutor:
                         if ctx.cancel_stage_index is not None
                         else cancelled_at
                     )
-                    if interrupted is not None and (
-                        ctx.stage_states[interrupted].status
+                    # A machine paused for a person next to it must not drive off to clean up.
+                    if (
+                        interrupted is not None
+                        and not paused_when_cancelled
+                        and ctx.stage_states[interrupted].status
                         != mission_state_pb2.STAGE_STATUS_WAITING
                     ):
                         # Cleanup drives, so a pause left standing would hold it forever.

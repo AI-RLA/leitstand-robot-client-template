@@ -76,8 +76,8 @@ source install/setup.bash
 ```
 
 The same block works on Ubuntu 22.04, 24.04 and 26.04. The virtual environment exists because pip
-may not replace the Python packages Ubuntu installed (24.04 refuses outright, and one of ours needs
-a newer PyYAML than 24.04 ships), and `--system-site-packages` keeps the ROS packages visible.
+may not replace the Python packages Ubuntu installed, and `--system-site-packages` keeps the ROS
+packages visible.
 `python -m colcon build` runs colcon under the environment's interpreter so the installed `client`
 entry point uses it. A plain `colcon build` binds it to `/usr/bin/python3`, which cannot import the
 packages above (`ModuleNotFoundError: zenoh` at start). `vcs` comes with `python3-vcstool`. Without
@@ -183,8 +183,8 @@ class Navigation(Protocol):
 `FakeNavigation` in the library is the minimal implementation, about 100 lines.
 `Nav2Navigation` in the ROS package is the complete reference: readiness probing, coordinate
 projection, a pause that stops the machine, resume (a coverage stage re-enters the path a few
-metres behind the machine; a navigation stage re-issues its original waypoint list), and
-structured error reporting.
+metres behind the machine, a navigation stage continues from the waypoints Nav2 reports as still
+ahead), and structured error reporting.
 
 `cancel_requested()` returns `None` while the run continues, otherwise the cancel mode. Return
 `StageResult(FAILED)` once the machine has stopped. Without a cancel, any status other than
@@ -196,12 +196,22 @@ FINISHED or FAILED ends the run as FAILED.
 
 - **GRACEFUL** cancels the Nav2 goal; the controller publishes zero velocity and the velocity
   smoother ramps down at its configured deceleration.
-- **IMMEDIATE** does the same, and additionally holds zero velocity on `nav2.stop_topic`
-  if you configure one. That must be a `twist_mux` input with top priority: a plain
-  `cmd_vel` publish would be overwritten by the next controller command. Without a mux the
-  two modes are identical; a guaranteed hard stop requires the emergency stop.
+- **IMMEDIATE** does the same, and additionally holds zero velocity on `nav2.stop_topic` until the
+  goal has ended (at most twice `nav2.send_goal_timeout_s`), if you configure one. That must be a
+  `twist_mux` input with top priority: a plain `cmd_vel` publish would be overwritten by the next
+  controller command. Without a mux the two modes are identical. A guaranteed hard stop requires
+  the emergency stop.
 
-After either, the stage's `on_cancel` cleanup runs and the run reports CANCELLED.
+After either, the stage's `on_cancel` cleanup runs and the run reports CANCELLED. A stage that was
+paused when the cancel arrived ends CANCELLED without its cleanup, so a machine someone paused, for
+example because a person stands next to it, does not drive off. A stage that fails with its own
+error during a cancel ends the run FAILED with that error, also without cleanup.
+
+When a stage ends without finishing, the client cancels every goal on the three Nav2 action
+servers, including goals other programs sent, and waits until they have ended. If a goal is still
+active a second later, it holds zero velocity on `nav2.stop_topic`, if configured, which overrides
+manual driving on that mux input. If it cannot confirm the stop, the stage's error says "The
+machine did not confirm that it stopped."
 
 ## Troubleshooting
 
@@ -216,7 +226,7 @@ After either, the stage's `on_cancel` cleanup runs and the run reports CANCELLED
 | `ModuleNotFoundError: rclpy` when the node starts | ROS was not sourced before `ros2 launch`. |
 | `ModuleNotFoundError: numpy` on the first message import | the virtual environment was created without `--system-site-packages`. |
 | `ModuleNotFoundError: zenoh` when the node starts | the workspace was built with a plain `colcon build` instead of `venv/bin/python -m colcon build`. |
-| A run fails a second or two after the robot starts driving, and the robot drives on | Nav2's behavior tree gave up waiting for the controller to acknowledge its `follow_path` goal (`bt_navigator` logs "Timed out while waiting for action server to acknowledge goal request") and aborted our goal, while the controller kept the goal it had accepted. Raise `bt_navigator: default_server_timeout` (milliseconds) well above the acknowledgement latency on that machine. |
+| A run fails a second or two after the robot starts driving | Nav2's behavior tree gave up waiting for the controller to acknowledge its `follow_path` goal (`bt_navigator` logs "Timed out while waiting for action server to acknowledge goal request") and aborted our goal, while the controller kept the goal it had accepted. Raise `bt_navigator: default_server_timeout` (milliseconds) well above the acknowledgement latency on that machine. |
 | A coverage stage never moves: `controller_server` logs "Failed to make progress" every 10 s | the controller sees too little path: `nav2.max_pose_spacing_m` must stay well inside the local costmap's half-size (Nav2 prunes the path beyond it) and inside the controller's lookahead. Enlarge the local costmap or lower the spacing. |
 | The robot spins and backs up right after a dispatch, then the stage fails | Nav2 could not plan and ran its recoveries, and `planner_server` says why. Most often "Global costmap is not current": a static layer without a map server, or an observation source that publishes nothing. A goal from RViz fails the same way. |
 

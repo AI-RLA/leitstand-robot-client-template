@@ -69,8 +69,9 @@ Suggested rates: 1 Hz idle, 5 Hz while driving.
 
 `leitstand/robot/<id>/mission/_action/send_goal` is a queryable. The backend sends a
 `MissionDispatchRequest{dispatch_id, mission}` and waits **10 s** for a
-`MissionDispatchResponse{accepted, reason}`. An explicit `accepted: false` is recorded REJECTED;
-no reply, or an unparseable one, is recorded FAILED.
+`MissionDispatchResponse{accepted, reason}`. An explicit `accepted: false` is recorded REJECTED.
+No reply, or an unparseable one, leaves the run PENDING, because the robot may have started: its
+`mission/state` frames settle the run, or the reconciliation at its next reconnect does.
 
 A `Mission` is a `run_id` and ordered `stages[]`. Each `Stage` has a `stage_id`, a `kind`,
 the matching payload, and `on_cancel[]` cleanup stages that are themselves not cancellable.
@@ -114,7 +115,10 @@ the command has taken effect. The backend believes the frame, not the reply; a r
 - `…/mission/_action/cancel_goal`: `CancelRequest{run_id, mode}`, 5 s. Cancel **only** the
   named run. `mode` is `GRACEFUL` (stop at the next safe point) or `IMMEDIATE` (stop now);
   `UNSPECIFIED` counts as GRACEFUL. After either, run `on_cancel` while still publishing
-  frames, then the terminal frame with `exec_status: CANCELLED`.
+  frames, then the terminal frame with `exec_status: CANCELLED`. A stage that was paused when
+  the cancel arrived skips `on_cancel`, so a paused machine never drives off on its own. A stage
+  that fails with its own error during a cancel ends the run `FAILED` with that error, without
+  `on_cancel`.
 - `…/mission/_action/pause` and `…/_action/resume`: `ControlRequest{run_id}`, 3 s. Report
   `PAUSED` only once the machine stands still, `RUNNING` once it moves again.
 

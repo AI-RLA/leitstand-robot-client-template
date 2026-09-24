@@ -2,7 +2,7 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>leitstand_client_ros2</name>
-  <version>0.1.1</version>
+  <version>0.1.2</version>
   <description>ROS 2 node for the Leitstand client: Nav2 navigation and GNSS pose relay.</description>
   <maintainer email="jannik.jose@hs-osnabrueck.de">Jannik Jose</maintainer>
   <license>Apache-2.0</license>
@@ -14,6 +14,7 @@
   <depend>geometry_msgs</depend>
   <depend>nav_msgs</depend>
   <depend>action_msgs</depend>
+  <depend>unique_identifier_msgs</depend>
   <depend>robot_localization</depend>
   <depend>tf2_ros</depend>
   <depend>sensor_msgs</depend>

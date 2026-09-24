@@ -6,7 +6,7 @@ from leitstand_client.navigation import FakeNavigation, Navigation, StageResult
 from leitstand_client.pose_source import PoseSource
 from leitstand_client.registration import build_zenoh_config, load_spec, open_session
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
 __all__ = [
     "FakeNavigation",

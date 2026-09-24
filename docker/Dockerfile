@@ -7,7 +7,7 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends python3-venv ros-${ROS_DISTRO}-rmw-cyclonedds-cpp \
  && rm -rf /var/lib/apt/lists/*
 
-# Ubuntu 24.04 refuses pip installs into the system Python (PEP 668), and the venv still sees the ROS packages
+# A venv, because pip may not modify Ubuntu's Python packages, with system site packages for rclpy.
 RUN python3 -m venv --system-site-packages /opt/venv
 ENV PATH=/opt/venv/bin:$PATH
 

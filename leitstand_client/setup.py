@@ -4,7 +4,7 @@ package_name = "leitstand_client"
 
 setup(
     name=package_name,
-    version="0.1.1",
+    version="0.1.2",
     description="Robot-side client for the Leitstand: registration, factsheet, missions, state, pose.",
     maintainer="Jannik Jose",
     maintainer_email="jannik.jose@hs-osnabrueck.de",
