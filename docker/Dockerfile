@@ -7,7 +7,7 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends python3-venv ros-${ROS_DISTRO}-rmw-cyclonedds-cpp \
  && rm -rf /var/lib/apt/lists/*
 
-# pip cannot replace Ubuntus Python packages, and protovalidate needs a newer PyYAML than 24.04 ships
+# Ubuntu 24.04 refuses pip installs into the system Python (PEP 668), and the venv still sees the ROS packages
 RUN python3 -m venv --system-site-packages /opt/venv
 ENV PATH=/opt/venv/bin:$PATH
 
