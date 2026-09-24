@@ -153,22 +153,29 @@ def _coverage_mission(
 
 
 def test_a_field_sized_coverage_mission_passes_validation():
-    """The engine sees only each segment's endpoints; the contract's two-point minimum must hold.
-
-    Emptying the segments to save time failed every coverage plan with 'invalid Mission'.
-    """
     proto_json.validate_mission(_coverage_mission(points_per_segment=400))
 
 
-def test_a_two_point_segment_passes_untrimmed():
+def test_a_two_point_segment_passes():
     proto_json.validate_mission(_coverage_mission(points_per_segment=2))
 
 
 def test_a_bad_point_deep_inside_a_segment_is_still_caught():
     import pytest
 
-    with pytest.raises(ValueError, match="latitude 95.0 out of range"):
+    with pytest.raises(ValueError, match=r"segments\[1\]\.geometry\[25\]\.wgs84\.lat: must be"):
         proto_json.validate_mission(_coverage_mission(points_per_segment=50, bad_lat_at=25))
+
+
+def test_a_site_local_point_in_a_coverage_path_is_rejected():
+    import pytest
+
+    mission = _coverage_mission(points_per_segment=3)
+    mission.stages[0].coverage.segments[1].geometry[1].CopyFrom(_site_local(1.0, 2.0))
+    with pytest.raises(
+        ValueError, match=r"stages\[0\]\.coverage\.segments\[1\]\.geometry\[1\]: must be a wgs84"
+    ):
+        proto_json.validate_mission(mission)
 
 
 def _site_local(x: float, y: float) -> mission_pb2.Waypoint:
@@ -202,10 +209,43 @@ def test_cleanup_stages_are_checked_too() -> None:
     cleanup = _nav_stage("c1")
     cleanup.kind = 99
     stage.on_cancel.append(cleanup)
-    with pytest.raises(ValueError, match="stage c1: unknown stage kind"):
+    with pytest.raises(ValueError, match=r"stages\[0\]\.on_cancel\[0\]: unknown stage kind"):
         proto_json.validate_mission(mission_pb2.Mission(run_id="m1", stages=[stage]))
 
 
 def test_a_well_formed_mission_still_passes() -> None:
     stage = _nav_stage(str(uuid.uuid4()))
     proto_json.validate_mission(mission_pb2.Mission(run_id=str(uuid.uuid4()), stages=[stage]))
+
+
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        (lambda m: setattr(m, "run_id", "nope"), r"^run_id: must be a valid UUID \(got 'nope'\)"),
+        (
+            lambda m: (
+                m.stages[0].coverage.segments[0].geometry[1].wgs84.__setattr__("heading_deg", 360.0)
+            ),
+            r"^stages\[0\]\.coverage\.segments\[0\]\.geometry\[1\]\.wgs84\.heading_deg: .*\(got 360\.0\)",
+        ),
+        (
+            lambda m: m.stages[0].coverage.segments[2].geometry.pop(),
+            r"^stages\[0\]\.coverage\.segments\[2\]\.geometry: ",
+        ),
+    ],
+)
+def test_a_refusal_names_the_field_and_the_value(change, reason) -> None:
+    mission = _coverage_mission(points_per_segment=2)
+    change(mission)
+    with pytest.raises(ValueError, match=reason):
+        proto_json.validate_mission(mission)
+
+
+def test_a_bad_point_in_a_cleanup_stage_is_named_by_its_position() -> None:
+    mission = _coverage_mission(points_per_segment=2)
+    cleanup = mission_pb2.Stage()
+    cleanup.CopyFrom(mission.stages[0])
+    cleanup.coverage.segments[0].geometry[0].wgs84.lat = 95.0
+    mission.stages[0].on_cancel.append(cleanup)
+    with pytest.raises(ValueError, match=r"^stages\[0\]\.on_cancel\[0\]\.coverage\."):
+        proto_json.validate_mission(mission)

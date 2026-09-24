@@ -8,7 +8,6 @@ backend; binary is a later encoding swap.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from datetime import datetime, timezone
 from typing import Any
 
@@ -46,73 +45,57 @@ def validate_mission(mission: mission_pb2.Mission) -> None:
     json_format.Parse enforces structure and enum names but not the bound constraints
     (lat/lon/heading ranges, min_items, uuid), and the enum is open, so a kind this client does
     not know must be refused here rather than fail while driving.
-
-    A coverage route is checked numerically because the constraint engine costs about six
-    milliseconds per waypoint, which for a field-sized route is seconds out of the 10 s dispatch
-    budget. The rules applied are those on WGS84Waypoint and must move with them.
     """
-    _validate_stage_shapes(mission.stages)
-
-    # Each segment keeps its two endpoints in the copy the engine sees: the contract requires at
-    # least two points per segment. The points between are checked numerically below.
-    trimmed = mission_pb2.Mission()
-    trimmed.CopyFrom(mission)
-    for stage in _walk_stages(trimmed):
-        for segment in stage.coverage.segments:
-            if len(segment.geometry) > 2:
-                first, last = segment.geometry[0], segment.geometry[-1]
-                del segment.geometry[:]
-                segment.geometry.append(first)
-                segment.geometry.append(last)
-    protovalidate.validate(trimmed)
-
-    for stage in _walk_stages(mission):
-        index = 0
-        for segment in stage.coverage.segments:
-            for waypoint in segment.geometry:
-                _validate_path_waypoint(stage.stage_id, index, waypoint)
-                index += 1
+    _validate_stage_shapes(mission.stages, "stages")
+    try:
+        # The refusal names the first violation only, so the rest need not be collected.
+        protovalidate.validate(mission, fail_fast=True)
+    except protovalidate.ValidationError as exc:
+        raise ValueError(_describe(exc.violations[0])) from exc
 
 
-def _validate_stage_shapes(stages: Any) -> None:
-    """Reject an unknown kind, a payload that does not match it, or mixed frames, at every depth."""
-    for stage in stages:
+def _describe(violation: protovalidate.Violation) -> str:
+    """Return the violated field's path, the rule's message and the value it refused."""
+    parts = []
+    for element in violation.proto.field.elements:
+        subscript = element.subscript
+        index = (
+            f"[{subscript.value}]" if subscript is not None and subscript.field == "index" else ""
+        )
+        parts.append(f"{element.field_name}{index}")
+    where = ".".join(parts) or "mission"
+    value = repr(violation.field_value)
+    if len(value) > 40:
+        value = value[:37] + "..."
+    return f"{where}: {violation.proto.message} (got {value})"
+
+
+def _validate_stage_shapes(stages: Any, prefix: str) -> None:
+    """Reject an unknown kind, a mismatched payload, mixed frames or a non-geographic path point.
+
+    Errors name the stage by its position, such as ``stages[0].on_cancel[1]``, the same way
+    ``_describe`` names a field.
+    """
+    for position, stage in enumerate(stages):
+        where = f"{prefix}[{position}]"
         payload = _PAYLOAD_FOR_KIND.get(stage.kind)
         if payload is None:
-            raise ValueError(f"stage {stage.stage_id}: unknown stage kind {stage.kind}")
+            raise ValueError(f"{where}: unknown stage kind {stage.kind}")
         if stage.WhichOneof("payload") != payload:
-            raise ValueError(f"stage {stage.stage_id}: kind {payload} without a {payload} payload")
+            raise ValueError(f"{where}: kind {payload} without a {payload} payload")
         if payload == "navigation":
             frames = {wp.WhichOneof("kind") for wp in stage.navigation.waypoints}
             if len(frames) > 1:
-                raise ValueError(f"stage {stage.stage_id}: waypoints mix frames {sorted(frames)}")
-        _validate_stage_shapes(stage.on_cancel)
-
-
-def _walk_stages(mission: mission_pb2.Mission) -> Iterator[mission_pb2.Stage]:
-    """Yield every coverage stage carrying segments, cleanup stages included."""
-
-    def walk(stages: Any) -> Iterator[mission_pb2.Stage]:
-        for stage in stages:
-            if stage.kind == mission_pb2.STAGE_KIND_COVERAGE and stage.coverage.segments:
-                yield stage
-            yield from walk(stage.on_cancel)
-
-    return walk(mission.stages)
-
-
-def _validate_path_waypoint(stage_id: str, index: int, waypoint: mission_pb2.Waypoint) -> None:
-    if waypoint.WhichOneof("kind") != "wgs84":
-        raise ValueError(f"stage {stage_id}: path[{index}] is not a geographic waypoint")
-    point = waypoint.wgs84
-    if not -90.0 <= point.lat <= 90.0:
-        raise ValueError(f"stage {stage_id}: path[{index}] latitude {point.lat} out of range")
-    if not -180.0 <= point.lon <= 180.0:
-        raise ValueError(f"stage {stage_id}: path[{index}] longitude {point.lon} out of range")
-    if point.HasField("heading_deg") and not 0.0 <= point.heading_deg < 360.0:
-        raise ValueError(
-            f"stage {stage_id}: path[{index}] heading {point.heading_deg} out of range"
-        )
+                raise ValueError(f"{where}.navigation: waypoints mix frames {sorted(frames)}")
+        else:
+            for s_index, segment in enumerate(stage.coverage.segments):
+                for g_index, waypoint in enumerate(segment.geometry):
+                    if waypoint.WhichOneof("kind") != "wgs84":
+                        raise ValueError(
+                            f"{where}.coverage.segments[{s_index}].geometry[{g_index}]: "
+                            "must be a wgs84 waypoint"
+                        )
+        _validate_stage_shapes(stage.on_cancel, f"{where}.on_cancel")
 
 
 def stage_nav_waypoints(stage: mission_pb2.Stage) -> list[mission_pb2.Waypoint]:
