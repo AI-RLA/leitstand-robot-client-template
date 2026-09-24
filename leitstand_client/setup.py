@@ -15,11 +15,11 @@ setup(
         ("share/" + package_name, ["package.xml"]),
     ],
     install_requires=[
-        "eclipse-zenoh>=1.0,<2",
+        "eclipse-zenoh>=1.10.1,<2",
         "pyyaml>=6.0",
         "pydantic>=2.6,<3.0",
         "protobuf>=7.35.1,<8",
-        "protovalidate>=1.2,<2",
+        "protovalidate>=2.0,<3",
         "leitstand-robot-contract==0.4.0",
     ],
     python_requires=">=3.10",
