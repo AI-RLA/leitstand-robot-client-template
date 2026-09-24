@@ -201,7 +201,9 @@ def test_the_heartbeat_keeps_reporting_during_cleanup() -> None:
     assert asyncio.run(run()) >= 2
 
 
-def test_a_cancel_while_paused_still_runs_the_cleanup_and_ends() -> None:
+def test_a_cancel_while_paused_ends_cancelled_without_the_cleanup() -> None:
+    """Someone may have paused because a person stands by the machine, so it must not drive off."""
+
     async def run() -> mission_state_pb2.MissionState:
         publisher = _Publisher()
         nav = FakeNavigation(speed_mps=1000.0, min_leg_s=0.05, tick_s=0.005)
@@ -220,7 +222,7 @@ def test_a_cancel_while_paused_still_runs_the_cleanup_and_ends() -> None:
 
     last = asyncio.run(run())
     assert last.exec_status == mission_state_pb2.MISSION_EXEC_STATUS_CANCELLED
-    assert _statuses(last)["a-cleanup"] == FINISHED
+    assert "a-cleanup" not in _statuses(last)
 
 
 def test_the_next_run_after_a_cancel_while_paused_starts_running() -> None:
@@ -311,3 +313,43 @@ def test_a_stage_that_stops_on_its_own_fails_the_run(
     assert error.type == error_type
     assert text in error.description
     assert ("stage_id", "a") in [(r.key, r.value) for r in error.references]
+
+
+class _FailsDuringTheCancel(FakeNavigation):
+    """Runs until the test cancels, then reports a failure with its own error."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+
+    async def execute_stage(self, stage, robot_id, cancel_requested, on_progress=None):
+        self.started.set()
+        while cancel_requested() is None:
+            await asyncio.sleep(0.005)
+        return StageResult(
+            status=FAILED,
+            error=mission_state_pb2.Error(type="stop_unconfirmed", description="not stopped"),
+        )
+
+
+def test_a_cancel_that_ends_with_an_error_fails_the_run_without_the_cleanup() -> None:
+    """Cleanup would send new goals to a machine whose stop nobody confirmed."""
+
+    async def run() -> mission_state_pb2.MissionState:
+        publisher = _Publisher()
+        nav = _FailsDuringTheCancel()
+        executor = _executor(nav, publisher)
+        ctx = _ActiveContext(
+            mission=mission_pb2.Mission(run_id=RUN, stages=[_stage("a", cleanup=True)])
+        )
+        task = asyncio.create_task(executor._execute_mission(ctx))
+        await nav.started.wait()
+        ctx.cancel_mode = mission_pb2.CANCEL_MODE_GRACEFUL
+        ctx.cancel_stage_index = 0
+        await asyncio.wait_for(task, timeout=2.0)
+        return publisher.frames[-1]
+
+    last = asyncio.run(run())
+    assert last.exec_status == mission_state_pb2.MISSION_EXEC_STATUS_FAILED
+    assert [e.type for e in last.errors] == ["stop_unconfirmed"]
+    assert "a-cleanup" not in _statuses(last)

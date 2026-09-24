@@ -16,9 +16,14 @@ the caller, not here.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import functools
 import logging
 import math
 import threading
+import time
+import uuid
+from collections.abc import AsyncIterator
 from typing import Any, Callable
 
 from leitstand.robot.v1 import mission_pb2, mission_state_pb2
@@ -49,6 +54,45 @@ async def _await_rclpy(future: Any) -> Any:
     future.add_done_callback(_on_done)
     await aio_fut
     return future.result()
+
+
+# Time the controller gets to stop on its own before zero velocity overrides its deceleration.
+_STOP_GRACE_S = 1.0
+_UNCONFIRMED_STOP = "The machine did not confirm that it stopped."
+
+
+def _cancel_if_accepted_late(future: Any) -> None:
+    """Cancel a goal whose acceptance arrived after we stopped waiting for it."""
+    try:
+        handle = future.result()
+    except Exception:  # noqa: BLE001 - a goal that failed to send runs nothing
+        return
+    if handle is not None and handle.accepted:
+        handle.cancel_goal_async()
+
+
+def _release(release: Callable[..., Any], *args: Any) -> None:
+    """Call one release step, logging a failure so the remaining steps still run."""
+    try:
+        release(*args)
+    except Exception as exc:  # noqa: BLE001
+        name = getattr(release, "__qualname__", repr(release))
+        logger.warning("[nav2_navigation] release %s failed: %s", name, exc)
+
+
+def _with_unconfirmed_stop(result: StageResult) -> StageResult:
+    """Return the result with a note that the machine may still be moving."""
+    error = mission_state_pb2.Error()
+    if result.error is None:
+        error.type = "stop_unconfirmed"
+        error.description = _UNCONFIRMED_STOP
+    else:
+        error.CopyFrom(result.error)
+        error.description = f"{error.description} {_UNCONFIRMED_STOP}".strip()
+    # A machine that may still be moving is always a fatal error.
+    error.severity = mission_state_pb2.ERROR_SEVERITY_FATAL
+    error.references.append(mission_state_pb2.ErrorReference(key="stop_confirmed", value="false"))
+    return StageResult(status=result.status, error=error)
 
 
 # All ROS imports are deferred so the module can be imported in environments
@@ -105,14 +149,16 @@ class Nav2Navigation:
         # is unit-tested without a ROS installation.
         import rclpy
         import tf2_ros
-        from action_msgs.msg import GoalStatus
+        from action_msgs.msg import GoalStatus, GoalStatusArray
+        from action_msgs.srv import CancelGoal
         from geographic_msgs.msg import GeoPoint
         from geometry_msgs.msg import PoseStamped, Twist
         from nav2_msgs.action import FollowPath, NavigateThroughPoses, NavigateToPose
         from nav_msgs.msg import Path
         from rclpy.action import ActionClient
-        from rclpy.qos import DurabilityPolicy, QoSProfile
+        from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_action_status_default
         from robot_localization.srv import FromLL
+        from unique_identifier_msgs.msg import UUID
 
         self._cfg = config
         self._node = node
@@ -120,6 +166,14 @@ class Nav2Navigation:
         self._GeoPoint = GeoPoint
         self._FromLL = FromLL
         self._GoalStatus = GoalStatus
+        # A goal in one of these may still move the machine.
+        self._active_statuses = frozenset(
+            {GoalStatus.STATUS_ACCEPTED, GoalStatus.STATUS_EXECUTING, GoalStatus.STATUS_CANCELING}
+        )
+        # UNKNOWN is not among them, so a goal whose state nobody knows is never taken as ended.
+        self._ended_statuses = frozenset(
+            {GoalStatus.STATUS_SUCCEEDED, GoalStatus.STATUS_CANCELED, GoalStatus.STATUS_ABORTED}
+        )
         self._Twist = Twist
         self._Path = Path
         self._PoseStamped = PoseStamped
@@ -134,6 +188,35 @@ class Nav2Navigation:
         )
         self._approach_client = ActionClient(node, NavigateToPose, config.actions.navigate_to_pose)
         self._follow_path_client = ActionClient(node, FollowPath, config.actions.follow_path)
+        self._CancelGoal = CancelGoal
+        # The goal is stopping or had already ended.
+        self._cancel_accepted = frozenset(
+            {CancelGoal.Response.ERROR_NONE, CancelGoal.Response.ERROR_GOAL_TERMINATED}
+        )
+        action_names = (
+            config.actions.navigate_through_poses,
+            config.actions.navigate_to_pose,
+            config.actions.follow_path,
+        )
+        self._cancel_all_clients = [
+            node.create_client(CancelGoal, f"{name}/_action/cancel_goal") for name in action_names
+        ]
+        self._UUID = UUID
+        # Per action server, each goal's latest status by goal id. Written by the rclpy executor
+        # thread, read by the asyncio loop, both under the lock.
+        self._goal_statuses: dict[str, dict[bytes, int]] = {}
+        self._goal_statuses_lock = threading.Lock()
+        self._status_subs = [
+            node.create_subscription(
+                GoalStatusArray,
+                f"{name}/_action/status",
+                functools.partial(self._store_goal_statuses, name),
+                qos_profile_action_status_default,
+            )
+            for name in action_names
+        ]
+        # Goals this stage asked for that no status has shown ended yet. Guarded by the lock.
+        self._requested_goals: set[bytes] = set()
         self._from_ll_client = node.create_client(FromLL, config.projection_service)
         # Nav2 stores a FollowPath goal and never republishes it, so RViz would otherwise show only
         # the controller's window; latched so a late subscriber still sees the commanded path.
@@ -159,18 +242,16 @@ class Nav2Navigation:
 
     def close(self) -> None:
         """Release what this object created on the node; the node itself belongs to the caller."""
-        for release in (
-            self._tf_listener.unregister,
-            self._action_client.destroy,
-            self._approach_client.destroy,
-            self._follow_path_client.destroy,
-            lambda: self._node.destroy_client(self._from_ll_client),
-            lambda: self._node.destroy_publisher(self._path_pub),
-        ):
-            try:
-                release()
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("[nav2_navigation] release failed: %s", exc)
+        _release(self._tf_listener.unregister)
+        for action_client in (self._action_client, self._approach_client, self._follow_path_client):
+            _release(action_client.destroy)
+        for client in (self._from_ll_client, *self._cancel_all_clients):
+            _release(self._node.destroy_client, client)
+        for subscription in self._status_subs:
+            _release(self._node.destroy_subscription, subscription)
+        for publisher in (self._path_pub, self._stop_pub):
+            if publisher is not None:
+                _release(self._node.destroy_publisher, publisher)
 
     # ------------------------------------------------------------------
     # Pause / resume
@@ -207,6 +288,29 @@ class Nav2Navigation:
     # ------------------------------------------------------------------
 
     async def execute_stage(
+        self,
+        stage: mission_pb2.Stage,
+        robot_id: str,
+        cancel_requested: CancelRequested,
+        on_progress: Callable[[int, float], None] | None = None,
+    ) -> StageResult:
+        # A stage that ends early can leave a goal running that nothing watches any more, also when a
+        # cancel arrived in the same moment as a navigation failure.
+        with self._goal_statuses_lock:
+            self._requested_goals = set()
+        try:
+            result = await self._execute_stage(stage, robot_id, cancel_requested, on_progress)
+        # A stage task cancelled from outside skips this, which only happens at shutdown.
+        except Exception:
+            if not await self._ensure_stopped():
+                logger.warning("[nav2_navigation] stage raised and its stop is unconfirmed")
+            raise
+        if result.status != mission_state_pb2.STAGE_STATUS_FINISHED:
+            if not await self._ensure_stopped():
+                result = _with_unconfirmed_stop(result)
+        return result
+
+    async def _execute_stage(
         self,
         stage: mission_pb2.Stage,
         robot_id: str,
@@ -261,27 +365,24 @@ class Nav2Navigation:
         # must marshal onto the asyncio loop (the caller's responsibility).
         total = len(poses)
         last_progress = [0.0]
+        # Nav2's count of the waypoints still ahead, which a resume continues from. Best effort:
+        # the default behaviour tree updates it every few seconds, and a tree without
+        # RemovePassedGoals never lowers it.
+        remaining = [total]
 
         def _fb(fb_msg: Any) -> None:
             rem = getattr(fb_msg.feedback, "number_of_poses_remaining", None)
-            if on_progress is not None and rem is not None and total > 0:
-                last_progress[0] = max(0.0, min(1.0, 1.0 - rem / total))
+            if rem is None or total <= 0:
+                return
+            remaining[0] = rem
+            if on_progress is not None:
+                last_progress[0] = max(last_progress[0], min(1.0, 1.0 - rem / total))
                 on_progress(mission_state_pb2.STAGE_STATUS_RUNNING, last_progress[0])
 
         try:
-            goal_handle = await asyncio.wait_for(
-                _await_rclpy(self._action_client.send_goal_async(goal, feedback_callback=_fb)),
-                timeout=self._send_goal_timeout_s,
-            )
+            goal_handle = await self._send_goal(self._action_client, goal, _fb)
         except asyncio.TimeoutError:
-            return StageResult(
-                status=mission_state_pb2.STAGE_STATUS_FAILED,
-                error=mission_state_pb2.Error(
-                    severity=mission_state_pb2.ERROR_SEVERITY_FATAL,
-                    type="nav2_send_goal_timeout",
-                    description=f"send_goal timed out after {self._send_goal_timeout_s}s",
-                ),
-            )
+            return self._send_goal_timed_out()
         if goal_handle is None or not goal_handle.accepted:
             return StageResult(
                 status=mission_state_pb2.STAGE_STATUS_FAILED,
@@ -298,25 +399,25 @@ class Nav2Navigation:
             on_progress(mission_state_pb2.STAGE_STATUS_RUNNING, 0.0)
 
         while True:
-            outcome, wrapped = await self._wait_goal(
+            outcome, detail = await self._wait_goal(
                 goal_handle, cancel_requested, on_progress, lambda: last_progress[0]
             )
-            if outcome == "cancelled":
-                return StageResult(status=mission_state_pb2.STAGE_STATUS_FAILED)
+            if outcome == "abandoned":
+                return StageResult(status=mission_state_pb2.STAGE_STATUS_FAILED, error=detail)
             if outcome == "done":
                 break
-            # Resumed after a pause: re-issue the original pose list (trimming to the unreached
-            # poses is not done).
-            goal_handle = await asyncio.wait_for(
-                _await_rclpy(self._action_client.send_goal_async(goal, feedback_callback=_fb)),
-                timeout=self._send_goal_timeout_s,
-            )
+            # Resending every waypoint would drive the machine back to the first one.
+            goal.poses = poses[min(total - remaining[0], total - 1) :]
+            try:
+                goal_handle = await self._send_goal(self._action_client, goal, _fb)
+            except asyncio.TimeoutError:
+                return self._send_goal_timed_out()
             if goal_handle is None or not goal_handle.accepted:
                 return StageResult(status=mission_state_pb2.STAGE_STATUS_FAILED)
 
         # rclpy returns a wrapper with .status and .result. SUCCEEDED == 4 per
         # action_msgs/GoalStatus.
-        status_code = getattr(wrapped, "status", None)
+        status_code = getattr(detail, "status", None)
         if status_code == 4:
             return StageResult(status=mission_state_pb2.STAGE_STATUS_FINISHED)
         return StageResult(
@@ -478,23 +579,9 @@ class Nav2Navigation:
         self._path_pub.publish(path)
 
         try:
-            handle = await asyncio.wait_for(
-                _await_rclpy(self._follow_path_client.send_goal_async(goal)),
-                timeout=self._send_goal_timeout_s,
-            )
+            handle = await self._send_goal(self._follow_path_client, goal)
         except asyncio.TimeoutError:
-            return (
-                StageResult(
-                    status=mission_state_pb2.STAGE_STATUS_FAILED,
-                    error=mission_state_pb2.Error(
-                        severity=mission_state_pb2.ERROR_SEVERITY_FATAL,
-                        type="nav2_send_goal_timeout",
-                        description=f"follow_path send_goal timed out after "
-                        f"{self._send_goal_timeout_s}s",
-                    ),
-                ),
-                False,
-            )
+            return self._send_goal_timed_out(), False
         if handle is None or not handle.accepted:
             return (
                 StageResult(
@@ -522,7 +609,7 @@ class Nav2Navigation:
                 last_progress[0] = reached / max(len(poses), 1)
                 on_progress(mission_state_pb2.STAGE_STATUS_RUNNING, last_progress[0])
 
-        outcome, wrapped = await self._wait_goal(
+        outcome, detail = await self._wait_goal(
             handle,
             cancel_requested,
             on_progress,
@@ -530,11 +617,11 @@ class Nav2Navigation:
             on_tick=_tick,
             tick_s=self._cfg.progress_tick_s,
         )
-        if outcome == "cancelled":
-            return StageResult(status=mission_state_pb2.STAGE_STATUS_FAILED), False
+        if outcome == "abandoned":
+            return StageResult(status=mission_state_pb2.STAGE_STATUS_FAILED, error=detail), False
         if outcome == "paused":
             return None, False
-        if getattr(wrapped, "status", None) == self._GoalStatus.STATUS_SUCCEEDED:
+        if getattr(detail, "status", None) == self._GoalStatus.STATUS_SUCCEEDED:
             return StageResult(status=mission_state_pb2.STAGE_STATUS_FINISHED), False
         return None, True
 
@@ -567,22 +654,9 @@ class Nav2Navigation:
         goal.pose = pose
         while True:
             try:
-                handle = await asyncio.wait_for(
-                    _await_rclpy(self._approach_client.send_goal_async(goal)),
-                    timeout=self._send_goal_timeout_s,
-                )
+                handle = await self._send_goal(self._approach_client, goal)
             except asyncio.TimeoutError:
-                return (
-                    StageResult(
-                        status=mission_state_pb2.STAGE_STATUS_FAILED,
-                        error=mission_state_pb2.Error(
-                            severity=mission_state_pb2.ERROR_SEVERITY_FATAL,
-                            type="nav2_send_goal_timeout",
-                            description=f"send_goal timed out after {self._send_goal_timeout_s}s",
-                        ),
-                    ),
-                    False,
-                )
+                return self._send_goal_timed_out(), False
             if handle is None or not handle.accepted:
                 return (
                     StageResult(
@@ -596,14 +670,16 @@ class Nav2Navigation:
                     False,
                 )
 
-            outcome, wrapped = await self._wait_goal(
+            outcome, detail = await self._wait_goal(
                 handle, cancel_requested, None, lambda: 0.0, tick_s=self._cfg.progress_tick_s
             )
-            if outcome == "cancelled":
-                return StageResult(status=mission_state_pb2.STAGE_STATUS_FAILED), False
+            if outcome == "abandoned":
+                return StageResult(
+                    status=mission_state_pb2.STAGE_STATUS_FAILED, error=detail
+                ), False
             if outcome == "paused":
                 continue
-            if getattr(wrapped, "status", None) == self._GoalStatus.STATUS_SUCCEEDED:
+            if getattr(detail, "status", None) == self._GoalStatus.STATUS_SUCCEEDED:
                 return None, False
             # The navigator gave up. Where it nonetheless left the machine close enough, the path
             # is reachable and the leg has done its job.
@@ -619,25 +695,34 @@ class Nav2Navigation:
         on_tick: Callable[[], None] | None = None,
         tick_s: float = 0.1,
     ) -> tuple[str, Any]:
-        """Wait on an accepted goal; return ("done", result), ("cancelled", None) or ("paused", None).
+        """Wait on an accepted goal and return how it ended.
 
-        A pause cancels the goal, reports PAUSED once the cancel has returned, holds until resume,
-        reports RUNNING and returns "paused" so the caller re-issues what is left.
+        ("done", result) when Nav2 finished it. A pause cancels the goal, reports PAUSED once Nav2
+        reports the goal ended, holds until resume, reports RUNNING and returns ("paused", None) so
+        the caller re-issues what is left. ("abandoned", error) ends the stage: a cancel has no
+        error, a pause whose goal Nav2 did not confirm as ended has one.
         """
         result_task = asyncio.create_task(_await_rclpy(handle.get_result_async()))
         while not result_task.done():
             if cancel_requested() is not None:
                 await self._abandon(handle, result_task, cancel_requested())
-                return "cancelled", None
+                return "abandoned", None
             if not self._running.is_set():
-                await self._abandon(handle, result_task)
+                acknowledged = await self._abandon(handle, result_task)
+                # PAUSED promises that the machine stands still, so it waits for the goal's end.
+                if not (acknowledged and await self._goals_end_within(self._send_goal_timeout_s)):
+                    return "abandoned", mission_state_pb2.Error(
+                        severity=mission_state_pb2.ERROR_SEVERITY_FATAL,
+                        type="pause_failed",
+                        description="Nav2 did not confirm that the paused goal ended.",
+                    )
                 self._paused.set()
                 if on_progress is not None:
                     on_progress(mission_state_pb2.STAGE_STATUS_PAUSED, progress())
                 while not self._running.is_set():
                     if cancel_requested() is not None:
                         self._paused.clear()
-                        return "cancelled", None
+                        return "abandoned", None
                     await asyncio.sleep(0.1)
                 self._paused.clear()
                 if on_progress is not None:
@@ -650,45 +735,162 @@ class Nav2Navigation:
 
     async def _abandon(
         self, handle: Any, result_task: asyncio.Task, mode: int | None = None
-    ) -> None:
-        """Cancel a running goal and stop waiting on its result.
+    ) -> bool:
+        """Cancel a running goal, stop waiting on its result, and return whether Nav2 accepted.
 
         Cancelling lets the controller and the velocity smoother bring the machine to a stop. An
         IMMEDIATE cancel additionally holds zero velocity on the stop topic, if one is configured,
-        until the cancel is acknowledged and briefly after: a single zero would be overwritten by
-        the next controller command, and only a priority mux input outranks the controller.
+        until the goal has ended, at most twice the send-goal timeout: a single zero would be
+        overwritten by the next controller command, and only a top-priority mux input wins over the
+        controller.
         """
-        hold = None
-        if is_immediate(mode) and self._stop_pub is not None:
-            hold = asyncio.create_task(self._hold_zero_velocity())
-        try:
+        holding = is_immediate(mode) and self._stop_pub is not None
+        acknowledged = True
+        async with self._zero_hold(holding):
             try:
-                await asyncio.wait_for(
+                response = await asyncio.wait_for(
                     _await_rclpy(handle.cancel_goal_async()), timeout=self._send_goal_timeout_s
                 )
+                acknowledged = response.return_code in self._cancel_accepted
             except asyncio.TimeoutError:
-                pass
+                acknowledged = False
+            if holding and self._rclpy.ok():
+                # The zero command must outlast the goal, or the next controller command replaces it.
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(result_task), timeout=self._send_goal_timeout_s
+                    )
+                except Exception:  # noqa: BLE001 - only the waiting matters, not the result
+                    pass
             result_task.cancel()
             try:
                 await result_task
             except (asyncio.CancelledError, Exception):  # noqa: B014
                 pass
-            if hold is not None:
-                await asyncio.sleep(0.5)
+        return acknowledged
+
+    @contextlib.asynccontextmanager
+    async def _zero_hold(self, active: bool) -> AsyncIterator[None]:
+        """Hold zero velocity on the stop topic while the block runs, if active and configured."""
+        if not active or self._stop_pub is None:
+            yield
+            return
+        hold = asyncio.create_task(self._hold_zero_velocity())
+        try:
+            yield
         finally:
-            # A hold that outlived this call would keep the machine stopped until the process died.
-            if hold is not None:
-                hold.cancel()
-                try:
-                    await hold
-                except asyncio.CancelledError:
-                    pass
+            # A hold that outlived its block would keep the machine stopped until the process died.
+            hold.cancel()
+            try:
+                await hold
+            except asyncio.CancelledError:
+                pass
+            except Exception:  # noqa: BLE001 - must not replace what the block raised
+                logger.exception("[nav2_navigation] zero velocity hold failed")
+
+    def _send_goal_timed_out(self) -> StageResult:
+        return StageResult(
+            status=mission_state_pb2.STAGE_STATUS_FAILED,
+            error=mission_state_pb2.Error(
+                severity=mission_state_pb2.ERROR_SEVERITY_FATAL,
+                type="nav2_send_goal_timeout",
+                description=f"send_goal timed out after {self._send_goal_timeout_s}s",
+            ),
+        )
 
     async def _hold_zero_velocity(self) -> None:
         zero = self._Twist()
         while True:
             self._stop_pub.publish(zero)
             await asyncio.sleep(0.05)
+
+    async def _send_goal(self, client: Any, goal: Any, feedback_callback: Any = None) -> Any:
+        """Send a goal and wait for its acceptance, bounded by the send-goal timeout.
+
+        The goal is tracked by its id until a status shows it ended or Nav2 rejects it. A goal
+        accepted after the wait is cancelled when its acceptance arrives.
+        """
+        goal_id = uuid.uuid4().bytes
+        with self._goal_statuses_lock:
+            self._requested_goals.add(goal_id)
+        future = client.send_goal_async(
+            goal, feedback_callback=feedback_callback, goal_uuid=self._UUID(uuid=list(goal_id))
+        )
+        try:
+            handle = await asyncio.wait_for(_await_rclpy(future), timeout=self._send_goal_timeout_s)
+        except asyncio.TimeoutError:
+            future.add_done_callback(_cancel_if_accepted_late)
+            raise
+        if handle is None or not handle.accepted:
+            with self._goal_statuses_lock:
+                self._requested_goals.discard(goal_id)
+        return handle
+
+    def _store_goal_statuses(self, action: str, msg: Any) -> None:
+        statuses = {bytes(s.goal_info.goal_id.uuid): s.status for s in msg.status_list}
+        ended = {g for g, status in statuses.items() if status in self._ended_statuses}
+        with self._goal_statuses_lock:
+            self._goal_statuses[action] = statuses
+            self._requested_goals -= ended
+
+    def _any_goal_active(self) -> bool:
+        """Return whether any goal may still move the machine, ours or another client's.
+
+        A goal we asked for counts until a status shows it ended, so a missing status or an
+        acceptance that has not arrived yet never reads as stopped.
+        """
+        with self._goal_statuses_lock:
+            if self._requested_goals:
+                return True
+            return any(
+                status in self._active_statuses
+                for statuses in self._goal_statuses.values()
+                for status in statuses.values()
+            )
+
+    async def _ensure_stopped(self) -> bool:
+        """Cancel every goal on the navigation action servers and wait until none is active.
+
+        Goals other clients sent are cancelled too, because a stage that failed must leave the
+        machine standing. Return whether the stop was confirmed.
+        """
+        if not self._rclpy.ok():
+            return False
+        try:
+            ready = [c for c in self._cancel_all_clients if c.service_is_ready()]
+            results = await asyncio.gather(
+                *(
+                    asyncio.wait_for(
+                        _await_rclpy(c.call_async(self._CancelGoal.Request())),
+                        timeout=self._send_goal_timeout_s,
+                    )
+                    for c in ready
+                ),
+                return_exceptions=True,
+            )
+            for client, outcome in zip(ready, results):
+                if isinstance(outcome, BaseException):
+                    logger.warning(
+                        "[nav2_navigation] cancel-all on %s failed: %r", client.srv_name, outcome
+                    )
+            if await self._goals_end_within(_STOP_GRACE_S):
+                return True
+            async with self._zero_hold(True):
+                if await self._goals_end_within(self._send_goal_timeout_s):
+                    return True
+            logger.warning("[nav2_navigation] stop_unconfirmed: a goal is still active")
+            return False
+        except Exception:  # noqa: BLE001 - the stage's own failure must still be reported
+            logger.exception("[nav2_navigation] cancel-all failed")
+            return False
+
+    async def _goals_end_within(self, timeout_s: float) -> bool:
+        deadline = time.monotonic() + timeout_s
+        while self._any_goal_active():
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(0.1)
+        return True
 
     async def _build_path_poses(self, stage: mission_pb2.Stage) -> list[Any]:
         """Convert a coverage stage's planned route to map-frame poses.
